@@ -1,0 +1,107 @@
+# -----------------------------
+# One function runner (with logging)
+# -----------------------------
+def suggest_next_point_for_function(func_id, seed):
+    cfg = FUNCTION_CONFIG[func_id]
+    dim = cfg["dim"]
+
+    folder = os.path.join(BASE_DIR, f"function_{func_id}")
+    X = np.load(os.path.join(folder, "initial_inputs.npy"))
+    y = np.load(os.path.join(folder, "initial_outputs.npy")).ravel()
+
+    if X.shape[1] != dim:
+        raise ValueError(f"Dim mismatch for function {func_id}: expected {dim}, got {X.shape[1]}")
+
+    # Transparency: this round should have ~19 points
+    if X.shape[0] != 19:
+        print(f"[WARN] Function {func_id}: expected 19 observations, found {X.shape[0]}")
+
+    x_next, debug = kernel_ucb_suggest(
+        X, y,
+        dim=dim,
+        kappa_base=cfg["kappa"],
+        n_candidates_base=cfg["n_candidates"],
+        seed=seed
+    )
+
+    submission = format_query(x_next)
+
+    record = {
+        "timestamp_utc": now_utc_iso(),
+        "stage": "Stage 2",
+        "round_context": "Completed 9 rounds; selecting next query with 19 data points.",
+        "function_id": int(func_id),
+        "dim": int(dim),
+        "n_obs": int(X.shape[0]),
+        "candidate_budget_base": int(cfg["n_candidates"]),
+        "kappa_base": float(cfg["kappa"]),
+        "suggested_x": [float(v) for v in x_next.tolist()],
+        "submission_string": submission,
+        "debug": debug,
+        "reproducibility": {
+            "seed": int(seed),
+            "clip_eps": float(CLIP_EPS),
+            "alpha_grid": ALPHA_GRID.tolist(),
+            "gamma_grid": GAMMA_GRID.tolist(),
+            "cv_splits": int(CV_SPLITS),
+        },
+    }
+
+    save_json(record, ARTIFACTS_DIR / f"function_{func_id}" / "run_record.json")
+
+    return x_next, submission, debug, record
+
+
+# -----------------------------
+# Run all functions (with consolidated logging)
+# -----------------------------
+def suggest_for_all_functions():
+    results = {}
+    debug_all = {}
+    records_all = {}
+
+    for func_id in range(1, 9):
+        x_next, submission, debug, record = suggest_next_point_for_function(func_id, seed=func_id)
+
+        results[func_id] = submission
+        debug_all[func_id] = debug
+        records_all[func_id] = record
+
+        print(f"Function {func_id}: {submission}")
+        print(f"  n_obs={debug['n_obs']}  n_candidates={debug['n_candidates_used']}  ensemble={debug['ENSEMBLE_B']}")
+        print(f"  tuned alpha={debug['alpha']} gamma={debug['gamma']} cv_mse={debug['cv_mse']:.6g}")
+        print(f"  noise_proxy={debug['noise_proxy']:.6g} -> kappa={debug['kappa_used']:.3f}")
+        print(f"  local_frac={debug['LOCAL_FRAC']:.2f} local_noise={debug['LOCAL_NOISE']:.3f} attn_top_m={debug['attn_top_m']}")
+        print(f"  decoder: temp={debug['temperature']:.3f} top_p={debug['top_p']:.3f} top_k={debug['top_k']} best_of={debug['best_of']}")
+        print(f"  risk_lambda={debug['risk_lambda']:.3f}")
+        print()
+
+    save_json(
+        {"timestamp_utc": now_utc_iso(), "results": results, "records": records_all},
+        ARTIFACTS_DIR / "stage2_next_queries.json"
+    )
+
+    return results, debug_all, records_all
+
+
+def make_reflection_snippet(record):
+    d = record["debug"]
+    return (
+        f"For function {record['function_id']} (d={record['dim']}), we selected the next query using an "
+        f"RBF Kernel Ridge surrogate with CV-tuned hyperparameters (alpha={d['alpha']}, gamma={d['gamma']}, "
+        f"CV MSE={d['cv_mse']:.4g}). With {d['n_obs']} observations, we estimated a noise proxy of "
+        f"{d['noise_proxy']:.4g}, which set exploration strength to kappa={d['kappa_used']:.2f}. "
+        f"We generated {d['n_candidates_used']} candidates using a global Sobol design plus "
+        f"{d['LOCAL_FRAC']:.2f} local sampling around the top {d['attn_top_m']} observed points. "
+        f"To improve robustness and interpretability, we applied risk controls (risk_lambda={d['risk_lambda']:.2f}) "
+        f"and avoided boundary-hugging points. We then used a decoding-style shortlist (temp={d['temperature']:.2f}, "
+        f"top_p={d['top_p']:.2f}, top_k={d['top_k']}, best_of={d['best_of']}) and chose the highest "
+        f"risk-adjusted candidate. Proposed submission: {record['submission_string']}."
+    )
+
+
+if __name__ == "__main__":
+    results, debug_all, records_all = suggest_for_all_functions()
+    for fid, rec in records_all.items():
+        print(make_reflection_snippet(rec))
+        print()
