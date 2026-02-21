@@ -1,0 +1,162 @@
+1. Motivation
+
+This dataset was created to support a black-box optimisation (BBO) task within the capstone project. The objective is to iteratively propose input queries to unknown functions and maximise their outputs under strict formatting and query constraints.
+
+The dataset enables:
+	•	Surrogate modelling of unknown objective functions
+	•	Exploration–exploitation trade-offs in optimisation
+	•	Evaluation of uncertainty-aware search strategies
+	•	Reflection on transparency and interpretability in optimisation
+
+The dataset was generated as part of an academic capstone project. It was not externally funded and is intended for educational and research purposes.
+
+⸻
+
+2. Composition
+
+Structure
+
+The dataset consists of multiple independent subsets — one per function (Functions 1–8). Each subset contains:
+	•	initial_inputs.npy
+	•	Shape: (n, d)
+	•	Continuous values in [0, 1)
+	•	d varies by function (2–8 dimensions)
+	•	initial_outputs.npy
+	•	Shape: (n,)
+	•	Scalar objective values returned by the optimisation portal
+
+At the current stage (Round 10), each function contains approximately 19 observations (initial points + 9 rounds of queries).
+
+Data Format
+	•	Numerical arrays stored in .npy format
+	•	Floating-point precision
+	•	Inputs clipped to remain strictly below 1.0 to satisfy portal submission constraints
+
+Gaps and Coverage
+
+The dataset is sparse, particularly for higher-dimensional functions (6–8D). With only ~19 samples per function, large regions of the search space remain unexplored.
+
+Sampling is not uniform:
+	•	Early rounds relied on space-filling designs
+	•	Later rounds increasingly focused on high-performing regions
+
+This creates a bias toward previously promising areas.
+
+Sensitive Data
+
+The dataset contains only synthetic numerical query–response pairs.
+There is no personally identifiable information (PII), demographic data, or human subject data.
+
+⸻
+
+3. Collection Process
+
+Query Generation Strategy
+
+Data was collected iteratively through an optimisation loop:
+	1.	Fit an RBF Kernel Ridge Regression (KRR) surrogate model.
+	2.	Tune hyperparameters (alpha, gamma) via cross-validation.
+	3.	Estimate predictive uncertainty using a bootstrap ensemble.
+	4.	Generate candidate points:
+	•	Global Sobol sampling (space-filling)
+	•	Local Gaussian sampling around top-performing points
+	5.	Score candidates using a risk-adjusted UCB acquisition function.
+	6.	Submit the highest-ranked candidate to the portal.
+	7.	Append the returned output to the dataset.
+
+Sampling Strategy
+
+The process is deterministic given:
+	•	Fixed seeds
+	•	Candidate budget settings
+	•	Hyperparameter grids
+
+Sampling is neither purely random nor fully deterministic; it combines quasi-random Sobol sampling with guided local exploration.
+
+Time Frame
+
+Data were collected sequentially over multiple project rounds (Stage 1 → Stage 2). Each new data point depends on previous observations.
+
+Ethical Considerations
+
+No human subjects were involved. No ethical approval was required.
+
+⸻
+
+4. Preprocessing, Transformations and Uses
+
+Preprocessing
+	•	StandardScaler used internally for surrogate modelling.
+	•	Inputs clipped to [0, 1 − ε] to satisfy submission formatting constraints.
+	•	No raw data were altered; preprocessing is applied only during modelling.
+
+Raw .npy files are preserved alongside optimisation artefacts to maintain reproducibility.
+
+Intended Uses
+	•	Surrogate modelling research
+	•	Bayesian optimisation experiments
+	•	Evaluation of exploration–exploitation strategies
+	•	Educational demonstrations of interpretable optimisation
+
+Inappropriate Uses
+	•	Benchmarking general-purpose ML models (dataset is too small)
+	•	Drawing conclusions about real-world systems
+	•	Claims about global optimality
+
+Risks and Biases
+	•	Local sampling amplifies previously identified promising regions.
+	•	Boundary penalties discourage edge exploration.
+	•	Sparse sampling may miss narrow global optima.
+
+5. Distribution
+
+The dataset is stored in the project repository under:
+
+initial_data/function_<id>/
+
+Accompanying artefacts include:
+	•	run_record.json (per function)
+	•	stage2_next_queries.json
+	•	MODEL_CARD.md
+	•	DATASHEET.md
+
+Access
+
+The dataset is distributed via GitHub as part of the capstone submission.
+
+Licensing
+
+Intended for academic use only. Redistribution depends on institutional guidelines for the capstone project.
+
+⸻
+
+6. Maintenance
+
+The dataset is maintained by the project author.
+
+Version control is handled through:
+	•	Git commits
+	•	JSON run records with timestamps
+	•	Clear separation between raw data and generated artefacts
+
+Future updates may include:
+	•	Additional rounds of optimisation
+	•	Revised surrogate models
+	•	Expanded documentation
+
+Archived versions will remain accessible via repository history.
+
+⸻
+
+Key Assumptions
+	•	The objective functions are sufficiently smooth for RBF kernels to approximate.
+	•	Bootstrap ensemble variance reasonably captures uncertainty.
+	•	Increasing local sampling improves performance as data accumulates.
+
+These assumptions may limit generalisability if functions are highly discontinuous or adversarial.
+
+⸻
+
+Summary
+
+This dataset represents an iterative optimisation process rather than a static benchmark. Its value lies not only in the numerical observations but also in the transparent documentation of how each query was generated. The inclusion of surrogate tuning logs, uncertainty metrics and reproducibility artefacts ensures that the optimisation process can be audited, understood and extended by future researchers.
