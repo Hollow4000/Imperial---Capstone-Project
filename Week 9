@@ -1,0 +1,351 @@
+import os
+import numpy as np
+from scipy.stats import qmc
+from sklearn.kernel_ridge import KernelRidge
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
+
+# -----------------------------
+# Config (baseline values)
+# -----------------------------
+FUNCTION_CONFIG = {
+    1: {"dim": 2, "kappa": 2.2, "n_candidates": 20000},
+    2: {"dim": 2, "kappa": 2.2, "n_candidates": 20000},
+    3: {"dim": 3, "kappa": 2.4, "n_candidates": 25000},
+    4: {"dim": 4, "kappa": 2.6, "n_candidates": 30000},
+    5: {"dim": 4, "kappa": 1.4, "n_candidates": 30000},
+    6: {"dim": 5, "kappa": 2.6, "n_candidates": 30000},
+    7: {"dim": 6, "kappa": 3.0, "n_candidates": 40000},
+    8: {"dim": 8, "kappa": 3.2, "n_candidates": 50000},
+}
+
+BASE_DIR = "initial_data"
+CLIP_EPS = 1e-6  # keep strictly < 1.0 so each value starts with "0."
+
+# Hyperparameter tuning grids (small but meaningful)
+ALPHA_GRID = np.array([1e-4, 1e-3, 1e-2, 1e-1], dtype=float)
+GAMMA_GRID = np.array([0.25, 0.5, 1.0, 2.0, 4.0], dtype=float)
+
+# CV settings
+CV_SPLITS = 5
+
+# -----------------------------
+# "Transformer-inspired" knobs
+# -----------------------------
+DECODER = {
+    # base decoding behaviour
+    "temperature_base": 0.65,
+    "top_p_base": 0.15,
+    "top_k_base": 250,
+
+    # attention-like local anchoring
+    "attn_top_m": 3,
+    "attn_softmax_temp": 0.25,
+
+    # best-of-N sampling (like generating multiple completions then selecting)
+    "best_of": 8,
+
+    # risk control (higher => more conservative)
+    "risk_lambda_base": 0.35,   # penalty weight on uncertainty
+    "dist_lambda": 0.12,        # penalty for being far from training set
+    "edge_lambda": 0.08,        # penalty for hugging boundaries (0 or 1)
+}
+
+# Base BO knobs
+BASE_ENSEMBLE_B = 12
+BASE_LOCAL_FRAC = 0.35
+BASE_LOCAL_NOISE = 0.07
+
+
+# -----------------------------
+# Utilities
+# -----------------------------
+def format_query(x):
+    x = np.clip(x, 0.0, 1.0 - CLIP_EPS)
+    return "-".join(f"{float(v):.6f}" for v in x)
+
+def sobol_candidates(n, dim, seed):
+    m = int(np.ceil(np.log2(n)))
+    sampler = qmc.Sobol(d=dim, scramble=True, seed=seed)
+    X = sampler.random(n=2**m)
+    return X[:n]
+
+def local_candidates(x_center, n, seed, noise):
+    rng = np.random.default_rng(seed)
+    X = x_center[None, :] + rng.normal(0.0, noise, size=(n, x_center.size))
+    return np.clip(X, 0.0, 1.0 - CLIP_EPS)
+
+def softmax(z, temp=1.0):
+    z = (z - np.max(z)) / max(temp, 1e-12)
+    e = np.exp(z)
+    return e / (np.sum(e) + 1e-12)
+
+def boundary_penalty(X):
+    """
+    Penalise points very close to 0 or 1.
+    Think of this like discouraging 'degenerate tokens' at the extremes.
+    """
+    # distance to nearest boundary in each dim
+    d = np.minimum(X, 1.0 - X)
+    # small d => large penalty
+    return (1.0 / (d + 1e-6)).mean(axis=1)
+
+
+# -----------------------------
+# Noise proxy + tuning
+# -----------------------------
+def estimate_noise_level(Xs, y, alpha, gamma, seed):
+    n = Xs.shape[0]
+    if n < 6:
+        return 0.0
+    kf = KFold(n_splits=min(CV_SPLITS, n), shuffle=True, random_state=seed)
+    errs = []
+    for tr, va in kf.split(Xs):
+        model = KernelRidge(kernel="rbf", alpha=alpha, gamma=gamma)
+        model.fit(Xs[tr], y[tr])
+        pred = model.predict(Xs[va])
+        errs.append(np.mean((pred - y[va]) ** 2))
+    return float(np.mean(errs))
+
+def tune_krr_hyperparams(Xs, y, seed):
+    best = {"alpha": None, "gamma": None, "cv_mse": np.inf}
+    n = Xs.shape[0]
+    kf = KFold(n_splits=min(CV_SPLITS, n), shuffle=True, random_state=seed)
+
+    for alpha in ALPHA_GRID:
+        for gamma in GAMMA_GRID:
+            mses = []
+            for tr, va in kf.split(Xs):
+                model = KernelRidge(kernel="rbf", alpha=alpha, gamma=gamma)
+                model.fit(Xs[tr], y[tr])
+                pred = model.predict(Xs[va])
+                mses.append(np.mean((pred - y[va]) ** 2))
+            cv_mse = float(np.mean(mses))
+            if cv_mse < best["cv_mse"]:
+                best = {"alpha": float(alpha), "gamma": float(gamma), "cv_mse": cv_mse}
+    return best
+
+
+# -----------------------------
+# Decoding over candidates (temperature / top-p / top-k)
+# -----------------------------
+def decode_choice(scores, rng, temperature, top_p, top_k):
+    probs = softmax(scores, temp=max(temperature, 1e-6))
+
+    order = np.argsort(-probs)
+    probs_sorted = probs[order]
+
+    k = min(int(top_k), len(order))
+    order = order[:k]
+    probs_sorted = probs_sorted[:k]
+
+    cdf = np.cumsum(probs_sorted)
+    cutoff = int(np.searchsorted(cdf, top_p))
+    cutoff = int(np.clip(cutoff, 0, len(probs_sorted) - 1))
+    keep = cutoff + 1
+
+    order = order[:keep]
+    probs_keep = probs_sorted[:keep]
+    probs_keep = probs_keep / (np.sum(probs_keep) + 1e-12)
+
+    return int(rng.choice(order, p=probs_keep))
+
+
+# -----------------------------
+# Kernel Ridge ensemble UCB + transformer-style scaling/robust decoding
+# -----------------------------
+def kernel_ucb_suggest(X, y, dim, kappa_base, n_candidates_base, seed):
+    rng = np.random.default_rng(seed)
+
+    n_obs = X.shape[0]  # now ~18
+    scaler = StandardScaler()
+    Xs = scaler.fit_transform(X)
+
+    # 1) tune surrogate hyperparams
+    tuned = tune_krr_hyperparams(Xs, y, seed=seed)
+    alpha_star, gamma_star = tuned["alpha"], tuned["gamma"]
+
+    # 2) noise proxy
+    noise_proxy = estimate_noise_level(Xs, y, alpha_star, gamma_star, seed=seed)
+    noise_norm = noise_proxy / (noise_proxy + 1.0)  # (0,1)
+
+    # 3) scaling behaviour: modestly scale budgets as data grows AND if noisy
+    # (Think: bigger model / more compute helps when the task is harder)
+    scale_with_data = np.clip((n_obs - 10) / 12.0, 0.0, 1.0)  # 0 at 10 pts, ~0.67 at 18
+    n_candidates = int(np.clip(
+        n_candidates_base * (1.0 + 0.25 * scale_with_data + 0.25 * noise_norm),
+        8000,
+        70000
+    ))
+
+    ENSEMBLE_B = int(np.clip(BASE_ENSEMBLE_B + 6 * scale_with_data + 10 * noise_norm, 10, 28))
+
+    LOCAL_FRAC = float(np.clip(BASE_LOCAL_FRAC - 0.15 * noise_norm + 0.05 * (1 - scale_with_data), 0.15, 0.45))
+    LOCAL_NOISE = float(np.clip(BASE_LOCAL_NOISE + 0.06 * noise_norm, 0.05, 0.16))
+
+    # 4) exploration strength (UCB)
+    kappa = float(np.clip(kappa_base + 0.9 * noise_norm - 0.2 * scale_with_data, 0.8, 4.0))
+
+    # 5) decoding knobs adapt like generation:
+    # - more data => lower temperature (more decisive)
+    # - more noise => higher temperature/top_p (more diverse)
+    temperature = float(np.clip(
+        DECODER["temperature_base"] + 0.45 * noise_norm - 0.25 * scale_with_data,
+        0.35, 1.15
+    ))
+    top_p = float(np.clip(
+        DECODER["top_p_base"] + 0.12 * noise_norm - 0.05 * scale_with_data,
+        0.08, 0.35
+    ))
+    top_k = int(np.clip(
+        DECODER["top_k_base"] + 350 * noise_norm + 200 * (1 - scale_with_data),
+        120, 900
+    ))
+
+    # 6) risk penalty strengthens with more data (you can afford to be choosier)
+    risk_lambda = float(np.clip(
+        DECODER["risk_lambda_base"] + 0.20 * scale_with_data,
+        0.20, 0.70
+    ))
+
+    # 7) attention over top-m anchors
+    m = min(DECODER["attn_top_m"], len(y))
+    top_idx = np.argsort(-y)[:m]
+    weights = softmax(y[top_idx], temp=DECODER["attn_softmax_temp"])
+
+    n_local = int(n_candidates * LOCAL_FRAC)
+    n_global = n_candidates - n_local
+
+    X_global = sobol_candidates(n_global, dim, seed)
+
+    locals_list = []
+    if n_local > 0 and m > 0:
+        alloc = np.maximum(1, (weights * n_local).astype(int))
+        while alloc.sum() > n_local:
+            alloc[np.argmax(alloc)] -= 1
+        while alloc.sum() < n_local:
+            alloc[np.argmax(weights)] += 1
+
+        for j, idx in enumerate(top_idx):
+            locals_list.append(local_candidates(X[idx], int(alloc[j]), seed + 1000 + j, noise=LOCAL_NOISE))
+
+    X_local = np.vstack(locals_list) if locals_list else np.empty((0, dim))
+    X_cand = np.vstack([X_global, X_local])
+    Xc = scaler.transform(X_cand)
+
+    # 8) ensemble predictions => mu, sigma
+    preds = np.zeros((ENSEMBLE_B, Xc.shape[0]), dtype=float)
+    n = Xs.shape[0]
+
+    for b in range(ENSEMBLE_B):
+        idx = rng.integers(0, n, size=n)
+        model = KernelRidge(kernel="rbf", alpha=alpha_star, gamma=gamma_star)
+        model.fit(Xs[idx], y[idx])
+        preds[b] = model.predict(Xc)
+
+    mu = preds.mean(axis=0)
+    sigma = preds.std(axis=0)
+
+    # distance to nearest training point (diversity + caution)
+    dists = np.min(np.linalg.norm(Xc[:, None, :] - Xs[None, :, :], axis=2), axis=1)
+    dists_norm = dists / (dists.max() + 1e-12)
+
+    # boundary penalty (avoid 0/1 edges unless strongly justified)
+    edge_pen = boundary_penalty(X_cand)
+    edge_pen = edge_pen / (edge_pen.max() + 1e-12)
+
+    # 9) baseline acquisition (UCB)
+    ucb = mu + kappa * (0.85 * sigma + 0.15 * dists_norm)
+
+    # 10) risk-adjusted score (robustness / “don’t be reckless”)
+    risk_adjusted = (
+        ucb
+        - risk_lambda * sigma
+        - DECODER["dist_lambda"] * dists_norm
+        - DECODER["edge_lambda"] * edge_pen
+    )
+
+    # 11) transformer-style decoding + best-of-N:
+    # sample several candidate indices with temperature/top-p/top-k,
+    # then choose the best risk-adjusted among them (reduces “hallucinated” picks).
+    best_of = int(np.clip(DECODER["best_of"], 3, 20))
+    sampled = [decode_choice(ucb, rng, temperature, top_p, top_k) for _ in range(best_of)]
+    sampled = np.unique(sampled)
+
+    chosen_idx = int(sampled[np.argmax(risk_adjusted[sampled])])
+    x_next = np.clip(X_cand[chosen_idx], 0.0, 1.0 - CLIP_EPS)
+
+    debug = {
+        "n_obs": int(n_obs),
+        "n_candidates_used": int(n_candidates),
+        "alpha": alpha_star,
+        "gamma": gamma_star,
+        "cv_mse": tuned["cv_mse"],
+        "noise_proxy": float(noise_proxy),
+        "noise_norm": float(noise_norm),
+        "ENSEMBLE_B": int(ENSEMBLE_B),
+        "LOCAL_FRAC": float(LOCAL_FRAC),
+        "LOCAL_NOISE": float(LOCAL_NOISE),
+        "kappa_used": float(kappa),
+        "temperature": float(temperature),
+        "top_p": float(top_p),
+        "top_k": int(top_k),
+        "best_of": int(best_of),
+        "risk_lambda": float(risk_lambda),
+        "attn_top_m": int(m),
+    }
+    return x_next, debug
+
+
+# -----------------------------
+# One function runner
+# -----------------------------
+def suggest_next_point_for_function(func_id, seed):
+    cfg = FUNCTION_CONFIG[func_id]
+    dim = cfg["dim"]
+
+    folder = os.path.join(BASE_DIR, f"function_{func_id}")
+    X = np.load(os.path.join(folder, "initial_inputs.npy"))
+    y = np.load(os.path.join(folder, "initial_outputs.npy")).ravel()
+
+    if X.shape[1] != dim:
+        raise ValueError(f"Dim mismatch for function {func_id}: expected {dim}, got {X.shape[1]}")
+
+    x_next, debug = kernel_ucb_suggest(
+        X, y,
+        dim=dim,
+        kappa_base=cfg["kappa"],
+        n_candidates_base=cfg["n_candidates"],
+        seed=seed
+    )
+
+    return x_next, format_query(x_next), debug
+
+
+# -----------------------------
+# Run all functions
+# -----------------------------
+def suggest_for_all_functions():
+    results = {}
+    debug_all = {}
+
+    for func_id in range(1, 9):
+        x_next, submission, debug = suggest_next_point_for_function(func_id, seed=func_id)
+
+        results[func_id] = submission
+        debug_all[func_id] = debug
+
+        print(f"Function {func_id}: {submission}")
+        print(f"  n_obs={debug['n_obs']}  n_candidates={debug['n_candidates_used']}  ensemble={debug['ENSEMBLE_B']}")
+        print(f"  tuned alpha={debug['alpha']} gamma={debug['gamma']} cv_mse={debug['cv_mse']:.6g}")
+        print(f"  noise_proxy={debug['noise_proxy']:.6g} -> kappa={debug['kappa_used']:.3f}")
+        print(f"  local_frac={debug['LOCAL_FRAC']:.2f} local_noise={debug['LOCAL_NOISE']:.3f} attn_top_m={debug['attn_top_m']}")
+        print(f"  decoder: temp={debug['temperature']:.3f} top_p={debug['top_p']:.3f} top_k={debug['top_k']} best_of={debug['best_of']}")
+        print(f"  risk_lambda={debug['risk_lambda']:.3f}")
+        print()
+
+    return results, debug_all
+
+
+if __name__ == "__main__":
+    suggest_for_all_functions()
