@@ -1,0 +1,137 @@
+BBO Capstone Project – Reflection
+
+Overview
+
+This project explored black-box optimisation through iterative query submission, with the objective of efficiently identifying high-performing regions of unknown functions. Over multiple rounds, my approach evolved from relatively simple stochastic search methods into a more structured, data-driven optimisation framework incorporating elements of surrogate modelling, clustering, dimensionality reduction and controlled exploration.
+
+What began as a basic implementation gradually became a system focused on understanding the structure of the search space, rather than simply sampling it.
+
+⸻
+
+Initial Codebase
+
+I began with a lightweight, custom-built framework centred around Kernel Ridge Regression (RBF kernel) paired with a simple Upper Confidence Bound (UCB) acquisition strategy.
+
+Rather than relying on a full Bayesian optimisation library, I deliberately chose to build from scratch. This allowed for:
+	•	Greater transparency over how decisions were made
+	•	Flexibility to iterate and experiment with different components
+	•	A deeper understanding of how exploration and exploitation interact
+
+At this stage, candidate points were generated using random or Sobol sampling, and selection was driven purely by predicted mean and uncertainty.
+
+While functional, this approach lacked structure and was highly sensitive to noise in early observations.
+
+⸻
+
+Evolution of the Approach
+
+Early Iterations (Rounds 1–3)
+
+The initial phase was exploratory and somewhat naïve. The model relied heavily on:
+	•	Random or quasi-random sampling
+	•	Basic UCB scoring
+	•	No adjustment for noise or model confidence
+
+This led to inconsistent performance. The model often overreacted to early data and prematurely focused on suboptimal regions.
+
+⸻
+
+Mid Iterations (Rounds 4–8)
+
+The first meaningful improvements came from introducing stability and calibration into the model.
+
+Key changes included:
+	•	Cross-validation for hyperparameter tuning (alpha and gamma), improving surrogate accuracy
+	•	A noise proxy, used to dynamically adjust exploration strength (kappa)
+	•	Local sampling around top-performing points, increasing efficiency
+
+These changes helped the model become more robust. Rather than reacting to individual observations, it began to recognise broader patterns in the data.
+
+⸻
+
+Later Iterations (Rounds 9–11)
+
+At this stage, the focus shifted from accuracy to structure.
+
+The most impactful addition was cluster-aware sampling:
+	•	Agglomerative clustering was used to identify natural groupings in observed data
+	•	Sampling was distributed across clusters based on performance and density
+	•	Under-sampled clusters were prioritised for exploration
+
+Alongside this, I introduced:
+	•	Risk-adjusted scoring, penalising high-uncertainty or boundary-heavy candidates
+	•	A decoder-style shortlist (top-k / top-p sampling) to reduce randomness in final selection
+
+This marked a turning point. The optimisation process became more deliberate, balancing global exploration with targeted refinement.
+
+⸻
+
+Final Iterations (Rounds 12+)
+
+In the final stages, I incorporated PCA-based dimensional structure into the search process.
+
+This allowed the model to:
+	•	Identify directions of highest variance (analogous to principal components)
+	•	Bias sampling along informative directions
+	•	Penalise movement into low-signal, noisy regions
+
+Local sampling was also made anisotropic, meaning it adapted to the geometry of the data rather than applying uniform noise.
+
+At this point, the system was no longer just sampling efficiently — it was actively modelling the shape of the problem space.
+
+⸻
+
+Final Results and Reflection
+
+In the final rounds, performance improvements became smaller but more consistent. This suggested that the model had begun converging on strong regions of the search space.
+
+If I were to restart or extend the project, I would:
+	•	Introduce Gaussian Processes earlier for more principled uncertainty modelling
+	•	Explore Thompson Sampling as an alternative to UCB
+	•	Consider simplifying later-stage complexity, as some additions risked diminishing returns
+
+⸻
+
+Trade-offs and Key Decisions
+
+The central challenge throughout the project was managing the exploration–exploitation trade-off.
+	•	Early on, too much exploration led to inefficient use of queries
+	•	Midway, excessive exploitation caused the model to become trapped in local optima
+	•	Later, this balance was improved through:
+	•	Noise-aware tuning of exploration (kappa)
+	•	Cluster-based allocation of sampling effort
+	•	PCA-guided reduction of uninformative exploration
+
+Another key trade-off was between model complexity and robustness. While adding clustering, PCA and decoding improved performance, each layer increased system complexity and required careful calibration to avoid instability.
+
+⸻
+
+Key Learnings
+
+Structured exploration outperforms randomness
+
+The most important insight from this project was that effective optimisation is not about increasing randomness, but about making exploration more informed.
+
+Techniques such as clustering and PCA allowed the model to:
+	•	Identify meaningful regions in the search space
+	•	Reduce redundant or noisy exploration
+	•	Focus computational effort where it mattered most
+
+⸻
+
+Real-world relevance
+
+These ideas extend beyond the capstone project.
+
+In a real-world context (e.g. finance or portfolio management), similar principles apply:
+	•	Identifying clusters of opportunity or behaviour
+	•	Allocating resources under uncertainty
+	•	Balancing risk against expected return
+
+⸻
+
+What surprised me most
+
+Two things stood out:
+	1.	How quickly simple methods plateau — early gains are easy, but sustained improvement requires structural insight
+	2.	How powerful relatively simple tools can be — clustering and PCA, when applied thoughtfully, had a disproportionate impact on performance
